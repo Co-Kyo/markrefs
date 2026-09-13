@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0"
+        required: true
+
+jobs:
+  publish-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout release ref
+        run: |
+          git fetch --tags --force
+          git checkout "$RELEASE_TAG"
+
+      - name: Version gate
+        id: version-gate
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          # Ancestry 门：tag 必须指向 main 历史上的 commit
+          git fetch origin main --depth=50
+          if ! git merge-base --is-ancestor "$RELEASE_TAG" origin/main; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "reason=tag-not-on-main" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "reason=version-mismatch" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install and verify
+        if: steps.version-gate.outputs.should_release == 'true'
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm run lint
+
+      - name: Ensure npm supports Trusted Publishing
+        if: steps.version-gate.outputs.should_release == 'true'
+        run: |
+          npm install -g npm@11.5.1 || (sleep 15 && npm install -g npm@11.5.1)
+          npm --version
+
+      - name: Publish (Trusted Publishing / OIDC)
+        if: steps.version-gate.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          # 版本已存在则跳过发布（首个版本走人工 bootstrap——OIDC 不能创建新包），
+          # 但仍继续打包与创建 Release。
+          if npm view "markrefs@$VERSION" >/dev/null 2>&1; then
+            echo "exists markrefs@$VERSION（跳过发布）"
+          elif [[ "$VERSION" == *-* ]]; then
+            npm publish --access public --tag beta
+          else
+            npm publish --access public
+          fi
+
+      - name: Pack release artifacts
+        if: steps.version-gate.outputs.should_release == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release
+          git archive --format=zip -o dist-release/source.zip "$RELEASE_TAG"
+          npm pack --pack-destination dist-release
+
+      - name: Create GitHub Release
+        if: steps.version-gate.outputs.should_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          files: |
+            dist-release/source.zip
+            dist-release/*.tgz
+          generate_release_notes: true
