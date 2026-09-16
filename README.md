@@ -53,3 +53,8 @@ const diagnostics = validate(
 ## 许可
 
 MIT
+
+## 在 skillnomad 组合中的位置
+
+依赖完整性层：名字→路径、目标存在性、重复声明；诊断直指 `file:line`。
+组合关系见 skillnomad 仓 `docs/guide/toolchain.md`（官方工具组合：`skillnomad` × `methodblocks` × `markrefs`）。
